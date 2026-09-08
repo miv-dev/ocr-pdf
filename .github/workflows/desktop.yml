@@ -38,11 +38,16 @@ jobs:
 
       - name: Linux WebKitGTK for pywebview
         if: matrix.name == 'linux'
+        # 22.04 rather than something newer on purpose: it links against
+        # glibc 2.35, so the build also runs on older distributions.
         run: |
           sudo apt-get update
-          sudo apt-get install -y libgirepository1.0-dev gir1.2-webkit2-4.0 \
-                                  python3-gi python3-gi-cairo gir1.2-gtk-3.0
-          python -m pip install pygobject
+          sudo apt-get install -y libgirepository1.0-dev libcairo2-dev pkg-config \
+                                  gir1.2-webkit2-4.0 gir1.2-gtk-3.0
+          # PyGObject 3.52 dropped girepository-1.0, which is all 22.04 ships.
+          # The distro's own python3-gi is no use here — it belongs to the
+          # system interpreter, not the one setup-python gave us.
+          python -m pip install "pygobject<3.51" pycairo
 
       - name: Install dependencies
         run: |
@@ -57,6 +62,56 @@ jobs:
         env:
           OCCULAR_BUNDLE_WEIGHTS: ${{ inputs.bundle_weights && '1' || '0' }}
         run: pyinstaller --noconfirm desktop/occular.spec
+
+      # The .NET bridge pywebview needs on Windows arrives as package data, so
+      # it goes missing without a sound. Fail the build here rather than ship a
+      # bundle that dies with "failed to resolve Python.Runtime.Loader.Initialize".
+      - name: Check the .NET bridge got bundled
+        if: matrix.name == 'windows'
+        shell: pwsh
+        run: |
+          $missing = @()
+          foreach ($p in @(
+            "dist/Occular/_internal/pythonnet/runtime/Python.Runtime.dll",
+            "dist/Occular/_internal/webview/lib/Microsoft.Web.WebView2.Core.dll",
+            "dist/Occular/_internal/webview/lib/Microsoft.Web.WebView2.WinForms.dll"
+          )) { if (-not (Test-Path $p)) { $missing += $p } }
+          if (-not (Get-ChildItem -Recurse dist/Occular/_internal/clr_loader -Filter *.dll -EA SilentlyContinue)) {
+            $missing += "clr_loader/**/*.dll"
+          }
+          if ($missing.Count) {
+            Write-Host "missing from the bundle:"; $missing | ForEach-Object { Write-Host "  $_" }
+            exit 1
+          }
+          Write-Host "the .NET bridge is present"
+
+      # Start the packaged binary and check it actually serves. Catches a
+      # bundle that is missing onnxruntime, cv2 or the viewer itself.
+      - name: Smoke test the packaged app
+        if: matrix.name != 'linux'
+        env:
+          OCCULAR_NO_WINDOW: "1"
+          OCCULAR_PORT: "8931"
+        shell: bash
+        run: |
+          if [ "${{ matrix.name }}" = "windows" ]; then
+            ./dist/Occular/Occular.exe > smoke.log 2>&1 &
+          else
+            ./dist/Occular/Occular > smoke.log 2>&1 &
+          fi
+          pid=$!
+          for i in $(seq 1 60); do
+            if curl -fsS "http://127.0.0.1:8931/health" > body.txt 2>/dev/null; then
+              echo "serving: $(cat body.txt)"
+              grep -q '"desktop":true' body.txt || { echo "not in desktop mode"; exit 1; }
+              curl -fsS "http://127.0.0.1:8931/vendor/pdfjs/pdf.min.js" -o /dev/null \
+                || { echo "vendored pdf.js missing"; exit 1; }
+              kill $pid 2>/dev/null || true
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "the app never answered on 8931"; cat smoke.log; exit 1
 
       - name: Package (Windows)
         if: matrix.name == 'windows'

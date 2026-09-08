@@ -11,7 +11,7 @@ import os
 import sys
 from pathlib import Path
 
-from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs
+from PyInstaller.utils.hooks import collect_all, collect_data_files, collect_dynamic_libs
 
 ROOT = Path(SPECPATH).resolve().parent
 BUNDLE_WEIGHTS = os.environ.get("OCCULAR_BUNDLE_WEIGHTS") == "1"
@@ -51,7 +51,25 @@ hiddenimports = [
     "webview",
 ]
 if sys.platform == "win32":
-    hiddenimports += ["webview.platforms.edgechromium", "clr_loader", "pythonnet"]
+    # pywebview draws its window with WinForms through pythonnet, so the build
+    # needs the .NET side of that bridge: Python.Runtime.dll (pythonnet), the
+    # ClrLoader shims (clr_loader) and the WebView2 assemblies under
+    # webview/lib. All of those are package *data* — listing the packages as
+    # hidden imports pulls in the Python wrappers and none of the DLLs, which
+    # is what "failed to resolve Python.Runtime.Loader.Initialize" means.
+    for _pkg in ("pythonnet", "clr_loader"):
+        _d, _b, _h = collect_all(_pkg)
+        datas += _d
+        binaries += _b
+        hiddenimports += _h
+
+    datas += collect_data_files("webview")          # webview/lib/*.dll
+    hiddenimports += [
+        "webview.platforms.winforms",               # the real backend module
+        "webview.platforms.edgechromium",
+        "clr",
+        "_cffi_backend",                            # clr_loader.ffi is cffi-based
+    ]
 elif sys.platform == "darwin":
     hiddenimports += ["webview.platforms.cocoa"]
 else:
@@ -106,6 +124,6 @@ if sys.platform == "darwin":
         info_plist={
             "NSHighResolutionCapable": True,
             "LSMinimumSystemVersion": "11.0",
-            "CFBundleShortVersionString": "1.0.0",
+            "CFBundleShortVersionString": "1.0.1",
         },
     )

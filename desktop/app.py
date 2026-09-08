@@ -173,31 +173,121 @@ def wait_until_up(port: int, timeout: float = 20.0) -> bool:
 # The window
 # --------------------------------------------------------------------------
 
-def open_window(url: str) -> None:
-    """Native window if pywebview is available, otherwise the default browser."""
+WINDOW_TITLE = "Selectable scan"
+WINDOW_SIZE = (1280, 880)
+
+
+def native_window(url: str) -> bool:
+    """
+    Show the page in an OS window via pywebview. True if it ran.
+
+    Every failure here is caught, not just a missing package: on Windows the
+    window is drawn by WinForms through pythonnet, and a bundle missing its
+    .NET assemblies raises from deep inside the loader rather than at import.
+    An unhandled error there kills the app instead of falling back, which is
+    the worst of the options available to us.
+    """
     try:
         import webview
-    except ImportError:
-        import webbrowser
-        print(f"pywebview is not installed — opening {url} in your browser instead.")
-        print("Press Ctrl+C to quit.")
-        webbrowser.open(url)
-        try:
-            while True:
-                time.sleep(3600)
-        except KeyboardInterrupt:
-            pass
+    except Exception:                                  # noqa: BLE001
+        logging.info("pywebview unavailable", exc_info=True)
+        return False
+
+    try:
+        webview.create_window(
+            WINDOW_TITLE,
+            url,
+            width=WINDOW_SIZE[0],
+            height=WINDOW_SIZE[1],
+            min_size=(900, 600),
+            text_select=True,      # the whole point of the app is selecting text
+        )
+        webview.start()            # blocks until the window closes
+        return True
+    except Exception:                                  # noqa: BLE001
+        logging.exception("the native window failed to start; falling back")
+        return False
+
+
+def find_chromium() -> str | None:
+    """A Chrome or Edge binary we can borrow a window from."""
+    if sys.platform == "win32":
+        roots = [os.environ.get(v) for v in
+                 ("PROGRAMFILES", "PROGRAMFILES(X86)", "LOCALAPPDATA")]
+        names = [
+            r"Microsoft\Edge\Application\msedge.exe",
+            r"Google\Chrome\Application\chrome.exe",
+        ]
+        for root in filter(None, roots):
+            for name in names:
+                path = Path(root) / name
+                if path.exists():
+                    return str(path)
+        return None
+
+    if sys.platform == "darwin":
+        for path in (
+            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+            "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+        ):
+            if Path(path).exists():
+                return path
+        return None
+
+    from shutil import which
+    for name in ("google-chrome", "chromium", "chromium-browser", "microsoft-edge"):
+        found = which(name)
+        if found:
+            return found
+    return None
+
+
+def browser_app_window(url: str, data: Path) -> bool:
+    """
+    A chromeless Chrome/Edge window — the fallback that still feels like an app.
+
+    The private profile directory is not optional: without it the browser hands
+    the URL to an already-running instance and exits immediately, so there is
+    nothing left to wait on and the app would quit while the window is open.
+    """
+    exe = find_chromium()
+    if not exe:
+        return False
+
+    import subprocess
+    profile = data / "window-profile"
+    profile.mkdir(parents=True, exist_ok=True)
+    logging.info("using %s in app mode", exe)
+    try:
+        subprocess.run([
+            exe,
+            f"--app={url}",
+            f"--user-data-dir={profile}",
+            f"--window-size={WINDOW_SIZE[0]},{WINDOW_SIZE[1]}",
+            "--no-first-run",
+            "--no-default-browser-check",
+        ])
+        return True
+    except Exception:                                  # noqa: BLE001
+        logging.exception("could not open a browser window")
+        return False
+
+
+def open_window(url: str, data: Path) -> None:
+    """Native window, else a chromeless browser window, else a plain tab."""
+    if native_window(url):
+        return
+    if browser_app_window(url, data):
         return
 
-    webview.create_window(
-        "Selectable scan",
-        url,
-        width=1280,
-        height=880,
-        min_size=(900, 600),
-        text_select=True,          # the whole point of the app is selecting text
-    )
-    webview.start()                # blocks until the window closes
+    import webbrowser
+    print(f"Opening {url} in your browser instead. Close this window to quit.")
+    webbrowser.open(url)
+    try:
+        while True:
+            time.sleep(3600)
+    except KeyboardInterrupt:
+        pass
 
 
 def main() -> int:
@@ -212,7 +302,20 @@ def main() -> int:
         print(f"The recognition engine did not start. See {log_path}", file=sys.stderr)
         return 1
 
-    open_window(f"http://127.0.0.1:{port}/")
+    url = f"http://127.0.0.1:{port}/"
+    if os.environ.get("OCCULAR_NO_WINDOW") == "1":
+        # Serve without a window: used by the build's smoke test, and handy
+        # when you want to point another browser at it.
+        print(f"Serving {url} — no window requested.")
+        logging.info("running headless on %s", url)
+        try:
+            while True:
+                time.sleep(3600)
+        except KeyboardInterrupt:
+            pass
+        return 0
+
+    open_window(url, data)
     return 0
 
 
