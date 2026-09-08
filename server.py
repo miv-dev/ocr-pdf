@@ -18,6 +18,7 @@ from flask import Flask, request, jsonify, send_from_directory
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 app = Flask(__name__, static_folder=None)
+app.config["MAX_CONTENT_LENGTH"] = int(os.environ.get("MAX_UPLOAD_MB", 32)) * 1024 * 1024
 
 _pipe = None
 _pipe_lang = None

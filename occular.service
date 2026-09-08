@@ -1,0 +1,43 @@
+[Unit]
+Description=Occular OCR service
+After=network.target
+
+[Service]
+Type=notify
+User=occular
+Group=www-data
+WorkingDirectory=/srv/occular
+
+# Model weights are cached under HOME, so give the service a real one that
+# survives restarts — otherwise it re-downloads them every boot.
+Environment=HOME=/var/lib/occular
+Environment=XDG_CACHE_HOME=/var/lib/occular/.cache
+Environment=PATH=/srv/occular/.venv/bin
+# Keep each worker's inference inside its own share of the CPU.
+Environment=OMP_NUM_THREADS=4
+Environment=WEB_CONCURRENCY=2
+
+RuntimeDirectory=occular
+RuntimeDirectoryMode=0750
+StateDirectory=occular
+
+ExecStart=/srv/occular/.venv/bin/gunicorn -c deploy/gunicorn.conf.py deploy.wsgi:application
+ExecReload=/bin/kill -s HUP $MAINPID
+Restart=on-failure
+RestartSec=5
+# Weights load slowly on first boot; don't shoot the service while it downloads.
+TimeoutStartSec=600
+KillMode=mixed
+
+# Hardening — the service only needs to read its own directory.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/occular
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=multi-user.target
