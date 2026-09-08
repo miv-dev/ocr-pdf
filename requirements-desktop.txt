@@ -1,0 +1,9 @@
+-r requirements.txt
+
+# The native window. On Windows this uses the WebView2 runtime that ships with
+# Windows 10 21H2 and later; on macOS WKWebView; on Linux WebKitGTK.
+pywebview==5.4
+pyinstaller==6.11.1
+
+# pywebview needs a .NET bridge to talk to WebView2.
+pythonnet==3.0.5; sys_platform == "win32"

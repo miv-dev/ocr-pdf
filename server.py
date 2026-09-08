@@ -25,6 +25,57 @@ _pipe_lang = None
 _reading_order = False            # set once we know whether the model is available
 _lock = threading.Lock()          # the models are not thread-safe
 
+# What the front end shows while the first run pulls weights from HuggingFace.
+# "idle" -> "downloading" -> "loading" -> "ready", or "error".
+_model_state = "idle"
+_model_error = None
+_download_baseline = None         # cache size when the download started
+DESKTOP = os.environ.get("OCCULAR_DESKTOP") == "1"
+
+# What a first run pulls down: detector, recognizer, charset and the language
+# model. Only used to draw a progress bar, so an estimate is good enough.
+EXPECTED_DOWNLOAD_BYTES = 400 * 1024 * 1024
+
+
+def _cache_bytes():
+    """How much is in the HuggingFace cache right now, part-downloaded files included."""
+    try:
+        from huggingface_hub.constants import HF_HUB_CACHE
+    except Exception:                              # noqa: BLE001
+        return 0
+    total = 0
+    for root, _dirs, files in os.walk(HF_HUB_CACHE):
+        for name in files:
+            try:
+                total += os.path.getsize(os.path.join(root, name))
+            except OSError:
+                pass                               # a blob being renamed under us
+    return total
+
+
+def _download_progress():
+    """Bytes fetched since this download started, and what we expect in total."""
+    if _download_baseline is None:
+        return None
+    done = max(0, _cache_bytes() - _download_baseline)
+    return {"downloaded": done, "total": max(EXPECTED_DOWNLOAD_BYTES, done)}
+
+
+def _weights_present():
+    """Are the detector/recognizer weights already on disk, locally or in the HF cache?"""
+    try:
+        from occular import model_files
+    except Exception:                              # noqa: BLE001
+        return False
+    if any(w.parent.name != "reading_order" for w in model_files.WEIGHTS_DIR.rglob("*.onnx")):
+        return True                                # shipped with the build
+    try:
+        from huggingface_hub.constants import HF_HUB_CACHE
+    except Exception:                              # noqa: BLE001
+        return False
+    repo = "models--" + model_files.WEIGHTS_HF_REPO.replace("/", "--")
+    return os.path.isdir(os.path.join(HF_HUB_CACHE, repo))
+
 
 def _try_reading_order():
     """The multi-column model is optional and downloads once. Fall back quietly."""
@@ -72,23 +123,51 @@ def order_lines(lines, page_width):
 
 def get_pipeline(languages):
     """Build the pipeline once and keep it warm; rebuild only if language changes."""
-    global _pipe, _pipe_lang, _reading_order
-    from occular import OCRPipeline, Settings
+    global _pipe, _pipe_lang, _reading_order, _model_state, _model_error
+    global _download_baseline
 
     key = tuple(languages) if languages else None
     if _pipe is None or _pipe_lang != key:
-        if _pipe is None:
-            _reading_order = _try_reading_order()
-        print(f"loading models (languages={languages or 'ru+en'}) …")
-        _pipe = OCRPipeline(Settings(
-            deskew=True,                    # straighten crooked scans
-            lm=True,                        # beam search + Russian language model
-            reading_order=_reading_order,   # order lines across columns
-            languages=languages,
-        ))
+        # Say something before the first import: pulling occular and onnxruntime
+        # into a frozen build takes the better part of a minute on a cold disk.
+        _model_state = "loading"
+        _model_error = None
+        try:
+            from occular import OCRPipeline, Settings
+
+            if _weights_present():
+                _model_state = "loading"
+            else:
+                _download_baseline = _cache_bytes()
+                _model_state = "downloading"
+            if _pipe is None:
+                _reading_order = _try_reading_order()
+            print(f"loading models (languages={languages or 'ru+en'}) …")
+            _pipe = OCRPipeline(Settings(
+                deskew=True,                    # straighten crooked scans
+                lm=True,                        # beam search + Russian language model
+                reading_order=_reading_order,   # order lines across columns
+                languages=languages,
+            ))
+        except Exception as exc:                   # noqa: BLE001
+            _model_state, _model_error = "error", str(exc)
+            raise
         _pipe_lang = key
         print("ready")
+    _model_state = "ready"
     return _pipe
+
+
+def warm_up():
+    """Load the default pipeline in the background so the first page isn't a long wait."""
+    def run():
+        try:
+            with _lock:
+                get_pipeline(None)
+        except Exception:                          # noqa: BLE001
+            app.logger.exception("model warm-up failed")
+
+    threading.Thread(target=run, name="warm-up", daemon=True).start()
 
 
 @app.route("/")
@@ -96,9 +175,24 @@ def index():
     return send_from_directory(HERE, "index.html")
 
 
+@app.route("/vendor/<path:name>")
+def vendor(name):
+    """pdf.js and friends, shipped with the app so it works with no internet."""
+    return send_from_directory(os.path.join(HERE, "vendor"), name)
+
+
 @app.route("/health")
 def health():
-    return jsonify({"ok": True})
+    return jsonify({"ok": True, "desktop": DESKTOP})
+
+
+@app.route("/models")
+def models():
+    """Where the weights are: idle | downloading | loading | ready | error."""
+    body = {"state": _model_state, "error": _model_error, "desktop": DESKTOP}
+    if _model_state == "downloading":
+        body["progress"] = _download_progress()
+    return jsonify(body)
 
 
 @app.route("/ocr", methods=["POST"])
@@ -163,5 +257,6 @@ def ocr():
 
 
 if __name__ == "__main__":
-    print("http://localhost:8000  —  models load on the first page")
+    print("http://localhost:8000  —  models load in the background")
+    warm_up()
     app.run(host="127.0.0.1", port=8000, threaded=True)

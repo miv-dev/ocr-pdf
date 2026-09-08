@@ -1,0 +1,5 @@
+# The recognition engine and the web app, shared by the server and desktop builds.
+occular-ocr==0.4.1
+flask==3.1.3
+numpy==1.26.4
+opencv-python-headless==4.11.0.86

@@ -1,10 +1,17 @@
 # Deploying the OCR service
 
+Recognition is CPU-heavy — about a second of a pinned core per page — so a small
+VPS struggles with it. If the server is the bottleneck, [the desktop
+app](DESKTOP.md) runs the same reader on the reader's own machine for Windows,
+macOS and Linux, and nothing leaves that machine. What follows is the server
+deployment.
+
 Layout on the server:
 
 ```
 /srv/occular/
 ├── index.html            # served by nginx, not by Flask
+├── vendor/pdfjs/         # pdf.js, served by nginx too
 ├── server.py
 ├── deploy/
 │   ├── wsgi.py

@@ -81,12 +81,29 @@
   }
   .status.on{opacity:1}
   .status.err{background:var(--toner)}
+  .status.wide{flex-direction:column;align-items:stretch;gap:7px;min-width:min(420px,80vw)}
+  .status .row{display:flex;align-items:center;gap:10px}
+  .track{
+    height:4px;border-radius:2px;background:rgba(255,255,255,.22);overflow:hidden;
+  }
+  .track i{
+    display:block;height:100%;width:0;background:#fff;border-radius:2px;
+    transition:width .3s ease-out;
+  }
+  .track.idle i{
+    width:34%;background:rgba(255,255,255,.75);
+    animation:slide 1.25s ease-in-out infinite;transition:none;
+  }
+  @keyframes slide{0%{margin-left:-34%}100%{margin-left:100%}}
+  .amount{font-size:12.5px;color:rgba(255,255,255,.7);font-variant-numeric:tabular-nums}
   .spin{
     width:12px;height:12px;border:2px solid rgba(255,255,255,.35);
     border-top-color:#fff;border-radius:50%;animation:spin .7s linear infinite;
   }
   @keyframes spin{to{transform:rotate(360deg)}}
-  @media (prefers-reduced-motion:reduce){*{transition:none!important}.spin{animation:none}}
+  @media (prefers-reduced-motion:reduce){
+    *{transition:none!important}.spin{animation:none}.track.idle i{animation:none;width:100%}
+  }
 </style>
 </head>
 <body>
@@ -128,19 +145,30 @@
       <span class="big">Drop a PDF here</span>
       <span class="small">or click to choose a file (PDF, PNG, JPG)</span>
     </div>
-    <div class="offline" id="offline" hidden>The OCR server isn't answering. Start it with <code>python server.py</code> and reload.</div>
+    <div class="offline" id="offline" hidden></div>
   </div>
 </div>
 
 <input type="file" id="file" accept="application/pdf,image/*" hidden>
-<div class="status" id="status"><span class="spin" id="spin"></span><span id="statusText"></span></div>
+<div class="status" id="status">
+  <div class="row"><span class="spin" id="spin"></span><span id="statusText"></span></div>
+  <div class="track" id="track" hidden><i id="trackFill"></i></div>
+  <div class="amount" id="amount" hidden></div>
+</div>
 
-<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script src="vendor/pdfjs/pdf.min.js"></script>
+<script>
+  // Vendored copy is the one that ships with the desktop app and works offline.
+  // Fall back to the CDN only if the local file is missing (e.g. a partial checkout).
+  if (!window.pdfjsLib) {
+    document.write('<scr' + 'ipt src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"><\/scr' + 'ipt>');
+  }
+</script>
 <script>
 (function () {
   "use strict";
 
-  var PDFJS_WORKER = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
+  var PDFJS_WORKER = "vendor/pdfjs/pdf.worker.min.js";
   var OCR_SCALE = 300 / 72;   // render pages at 300 dpi, what Occular expects
 
   if (window.pdfjsLib) pdfjsLib.GlobalWorkerOptions.workerSrc = PDFJS_WORKER;
@@ -148,6 +176,7 @@
   var $ = function (id) { return document.getElementById(id); };
   var stage = $("stage"), start = $("start"), bar = $("bar"), fileInput = $("file");
   var statusBox = $("status"), statusText = $("statusText"), spin = $("spin");
+  var track = $("track"), trackFill = $("trackFill"), amount = $("amount");
 
   var pdf = null, imageFile = null, total = 1, current = 1;
   var lines = {}, native = {};
@@ -159,13 +188,91 @@
     statusBox.classList.toggle("on", !!text);
     statusBox.classList.toggle("err", !!isError);
     spin.style.display = spinning ? "block" : "none";
+    progress(null);
+  }
+
+  function mb(bytes) { return (bytes / 1048576).toFixed(0) + " MB"; }
+
+  /**
+   * Show a bar under the status line.
+   *   progress(null)            hide it
+   *   progress({})              indeterminate — something is happening, no numbers
+   *   progress({downloaded,total})  determinate
+   */
+  function progress(p) {
+    if (!p) {
+      statusBox.classList.remove("wide");
+      track.hidden = amount.hidden = true;
+      return;
+    }
+    statusBox.classList.add("wide");
+    track.hidden = false;
+
+    if (typeof p.downloaded !== "number" || !p.total) {
+      track.classList.add("idle");
+      trackFill.style.width = "";
+      amount.hidden = true;
+      return;
+    }
+
+    // Never show a full bar while work is still going on.
+    var pct = Math.min(99, Math.round((p.downloaded / p.total) * 100));
+    track.classList.remove("idle");
+    trackFill.style.width = pct + "%";
+    amount.hidden = false;
+    amount.textContent = mb(p.downloaded) + " of about " + mb(p.total) + "  ·  " + pct + "%";
   }
   function hush(delay) { setTimeout(function () { statusBox.classList.remove("on"); }, delay || 1400); }
 
-  // Is the Python side up?
-  fetch("/health").then(function (r) {
-    if (!r.ok) throw 0;
-  }).catch(function () { $("offline").hidden = false; });
+  // Is the Python side up, and are the models on disk yet?
+  var MODELS_READY = false;
+
+  function showOffline(desktop) {
+    var el = $("offline");
+    el.innerHTML = desktop
+      ? "The recognition engine stopped responding. Restart the app."
+      : "The OCR server isn't answering. Start it with <code>python server.py</code> and reload.";
+    el.hidden = false;
+  }
+
+  (function pollModels() {
+    fetch("/models").then(function (r) {
+      if (!r.ok) throw 0;
+      return r.json();
+    }).then(function (m) {
+      $("offline").hidden = true;
+
+      if (m.state === "ready") {
+        MODELS_READY = true;
+        if (/models/i.test(statusText.textContent)) { say("Recognition models ready.", false); hush(); }
+        return;
+      }
+      if (m.state === "error") {
+        // Usually a dropped connection during the first download. Opening a page
+        // makes the server try again, so keep watching rather than giving up.
+        MODELS_READY = false;
+        say("Could not load the recognition models: " + (m.error || "unknown error") +
+            " — opening a page will try again.", false, true);
+        setTimeout(pollModels, 8000);
+        return;
+      }
+
+      // "downloading" or "loading" — the first run pulls the weights once.
+      MODELS_READY = false;
+      if (m.state === "downloading") {
+        say("Downloading recognition models. This happens once.", true);
+        progress(m.progress || {});
+      } else {
+        say("Loading recognition models…", true);
+        progress({});
+      }
+      setTimeout(pollModels, 1000);
+    }).catch(function () {
+      MODELS_READY = false;
+      showOffline(window.__DESKTOP__ === true);
+      setTimeout(pollModels, 3000);
+    });
+  })();
 
   // ---------- opening a file ----------
   var drop = $("drop");
