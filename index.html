@@ -1,0 +1,447 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Selectable scan — read and copy from scanned PDFs</title>
+<style>
+  :root{
+    --paper:#E9EDF0;
+    --sheet:#FFFFFF;
+    --ink:#131A21;
+    --ink-soft:#5C6B78;
+    --rule:#C2CCD4;
+    --toner:#C0246B;
+    --toner-soft:#F3D9E5;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%}
+  body{
+    background:var(--paper);color:var(--ink);
+    font-family:"Inter","Segoe UI",system-ui,-apple-system,sans-serif;
+    font-size:15px;line-height:1.5;-webkit-font-smoothing:antialiased;
+    display:flex;flex-direction:column;height:100vh;overflow:hidden;
+  }
+
+  .bar{
+    display:flex;align-items:center;gap:14px;flex-wrap:wrap;
+    padding:10px 18px;background:var(--sheet);border-bottom:2px solid var(--ink);
+  }
+  .bar h1{font-size:17px;font-weight:650;letter-spacing:-0.02em;margin:0 8px 0 0;white-space:nowrap}
+  .sep{width:1px;height:22px;background:var(--rule)}
+  .grow{flex:1}
+  button,select{
+    font:inherit;font-size:14px;padding:7px 12px;border-radius:3px;
+    border:1px solid var(--rule);background:var(--sheet);color:var(--ink);cursor:pointer;
+  }
+  button.solid{background:var(--ink);border-color:var(--ink);color:#fff;font-weight:550}
+  button:hover:not(:disabled){background:var(--toner-soft);border-color:var(--toner)}
+  button.solid:hover:not(:disabled){background:#000;border-color:#000}
+  button:disabled{opacity:.4;cursor:not-allowed}
+  button:focus-visible,select:focus-visible{outline:2px solid var(--toner);outline-offset:2px}
+  .pageno{font-size:14px;color:var(--ink-soft);white-space:nowrap}
+  .pageno b{color:var(--ink);font-weight:600}
+  label.check{display:flex;align-items:center;gap:6px;font-size:14px;color:var(--ink-soft);cursor:pointer}
+
+  .stage{flex:1;overflow:auto;padding:26px;display:flex;justify-content:center;align-items:flex-start}
+  .sheet{
+    position:relative;background:var(--sheet);
+    box-shadow:0 1px 0 var(--rule),0 10px 30px rgba(19,26,33,.14);
+  }
+  .sheet canvas{display:block;width:100%;height:auto}
+
+  .layer{position:absolute;inset:0;overflow:hidden;line-height:1;user-select:text}
+  .layer .ln{
+    position:absolute;white-space:nowrap;transform-origin:0 0;color:transparent;
+    font-family:ui-monospace,Menlo,Consolas,monospace;cursor:text;display:block;
+  }
+  .layer ::selection{background:rgba(192,36,107,.32);color:transparent}
+  .layer.peek .ln{color:rgba(192,36,107,.85)}
+  .layer.peek .ln.weak{color:rgba(19,26,33,.45)}
+  .layer.peek ::selection{color:rgba(192,36,107,.85)}
+  .layer.busy{pointer-events:none}
+
+  .start{margin:auto;max-width:540px;text-align:center;padding:24px}
+  .start h2{font-size:clamp(26px,4vw,38px);letter-spacing:-0.03em;margin:0 0 12px;line-height:1.08}
+  .start p{color:var(--ink-soft);margin:0 auto 26px;max-width:46ch}
+  #drop{
+    border:2px dashed var(--rule);background:var(--sheet);padding:34px 22px;
+    border-radius:3px;cursor:pointer;transition:border-color .12s;
+  }
+  #drop:hover,#drop.over{border-color:var(--toner)}
+  #drop .big{display:block;font-weight:600;margin-bottom:4px}
+  #drop .small{font-size:13px;color:var(--ink-soft)}
+  .offline{margin-top:18px;font-size:13px;color:var(--toner)}
+
+  .status{
+    position:fixed;left:50%;bottom:22px;transform:translateX(-50%);
+    background:var(--ink);color:#fff;font-size:14px;padding:9px 16px;border-radius:3px;
+    display:flex;align-items:center;gap:10px;box-shadow:0 6px 22px rgba(19,26,33,.3);
+    opacity:0;pointer-events:none;transition:opacity .15s;max-width:88vw;
+  }
+  .status.on{opacity:1}
+  .status.err{background:var(--toner)}
+  .spin{
+    width:12px;height:12px;border:2px solid rgba(255,255,255,.35);
+    border-top-color:#fff;border-radius:50%;animation:spin .7s linear infinite;
+  }
+  @keyframes spin{to{transform:rotate(360deg)}}
+  @media (prefers-reduced-motion:reduce){*{transition:none!important}.spin{animation:none}}
+</style>
+</head>
+<body>
+
+<div class="bar" id="bar" hidden>
+  <h1>Selectable scan</h1>
+  <button id="open">Open another</button>
+  <div class="sep"></div>
+  <button id="prev">←</button>
+  <span class="pageno"><b id="pnum">1</b> / <span id="ptotal">1</span></span>
+  <button id="next">→</button>
+  <div class="sep"></div>
+  <select id="lang" title="Language on the page">
+    <option value="ru+en" selected>Russian + English</option>
+    <option value="uk">Ukrainian</option>
+    <option value="be">Belarusian</option>
+    <option value="kk">Kazakh</option>
+    <option value="bg">Bulgarian</option>
+    <option value="sr">Serbian</option>
+    <option value="auto">Detect automatically</option>
+  </select>
+  <select id="zoom" title="Zoom">
+    <option value="fit" selected>Fit width</option>
+    <option value="0.75">75%</option>
+    <option value="1">100%</option>
+    <option value="1.5">150%</option>
+    <option value="2">200%</option>
+  </select>
+  <label class="check"><input type="checkbox" id="peek"> Show text layer</label>
+  <div class="grow"></div>
+  <button class="solid" id="copyPage">Copy this page</button>
+</div>
+
+<div class="stage" id="stage">
+  <div class="start" id="start">
+    <h2>Select text straight off the scan</h2>
+    <p>Open a scanned PDF and each page is read by Occular-OCR running on your machine. The words are laid invisibly over the picture, so you can drag across a paragraph and copy it as if it were a normal document.</p>
+    <div id="drop" tabindex="0" role="button" aria-label="Choose a PDF or image">
+      <span class="big">Drop a PDF here</span>
+      <span class="small">or click to choose a file (PDF, PNG, JPG)</span>
+    </div>
+    <div class="offline" id="offline" hidden>The OCR server isn't answering. Start it with <code>python server.py</code> and reload.</div>
+  </div>
+</div>
+
+<input type="file" id="file" accept="application/pdf,image/*" hidden>
+<div class="status" id="status"><span class="spin" id="spin"></span><span id="statusText"></span></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script>
+(function () {
+  "use strict";
+
+  var PDFJS_WORKER = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
+  var OCR_SCALE = 300 / 72;   // render pages at 300 dpi, what Occular expects
+
+  if (window.pdfjsLib) pdfjsLib.GlobalWorkerOptions.workerSrc = PDFJS_WORKER;
+
+  var $ = function (id) { return document.getElementById(id); };
+  var stage = $("stage"), start = $("start"), bar = $("bar"), fileInput = $("file");
+  var statusBox = $("status"), statusText = $("statusText"), spin = $("spin");
+
+  var pdf = null, imageFile = null, total = 1, current = 1;
+  var lines = {}, native = {};
+  var sheet = null, canvas = null, layer = null;
+  var running = false, token = 0;
+
+  function say(text, spinning, isError) {
+    statusText.textContent = text;
+    statusBox.classList.toggle("on", !!text);
+    statusBox.classList.toggle("err", !!isError);
+    spin.style.display = spinning ? "block" : "none";
+  }
+  function hush(delay) { setTimeout(function () { statusBox.classList.remove("on"); }, delay || 1400); }
+
+  // Is the Python side up?
+  fetch("/health").then(function (r) {
+    if (!r.ok) throw 0;
+  }).catch(function () { $("offline").hidden = false; });
+
+  // ---------- opening a file ----------
+  var drop = $("drop");
+  drop.addEventListener("click", function () { fileInput.click(); });
+  drop.addEventListener("keydown", function (e) {
+    if (e.key === "Enter" || e.key === " ") { e.preventDefault(); fileInput.click(); }
+  });
+  ["dragenter", "dragover"].forEach(function (ev) {
+    document.addEventListener(ev, function (e) { e.preventDefault(); drop.classList.add("over"); });
+  });
+  ["dragleave", "drop"].forEach(function (ev) {
+    document.addEventListener(ev, function (e) { e.preventDefault(); drop.classList.remove("over"); });
+  });
+  document.addEventListener("drop", function (e) {
+    if (e.dataTransfer.files && e.dataTransfer.files[0]) load(e.dataTransfer.files[0]);
+  });
+  fileInput.addEventListener("change", function () {
+    if (fileInput.files[0]) load(fileInput.files[0]);
+  });
+  $("open").addEventListener("click", function () { fileInput.click(); });
+
+  async function load(f) {
+    var isPdf = f.type === "application/pdf" || /\.pdf$/i.test(f.name);
+    if (!isPdf && !/^image\//.test(f.type)) {
+      say("That file type can't be opened here. Use a PDF, PNG or JPG.", false, true);
+      hush(3500); return;
+    }
+
+    token++;
+    lines = {}; native = {}; current = 1; pdf = null; imageFile = null;
+    say("Opening " + f.name + "…", true);
+
+    try {
+      if (isPdf) {
+        var buf = await f.arrayBuffer();
+        pdf = await pdfjsLib.getDocument({ data: buf }).promise;
+        total = pdf.numPages;
+      } else {
+        imageFile = f;
+        total = 1;
+      }
+    } catch (e) {
+      say("That file couldn't be opened — it may be damaged or password-protected.", false, true);
+      hush(4000); return;
+    }
+
+    start.hidden = true;
+    bar.hidden = false;
+    $("ptotal").textContent = total;
+    buildSheet();
+    show(1);
+  }
+
+  function buildSheet() {
+    stage.innerHTML = "";
+    sheet = document.createElement("div");
+    sheet.className = "sheet";
+    canvas = document.createElement("canvas");
+    layer = document.createElement("div");
+    layer.className = "layer";
+    if ($("peek").checked) layer.classList.add("peek");
+    sheet.appendChild(canvas);
+    sheet.appendChild(layer);
+    stage.appendChild(sheet);
+  }
+
+  // ---------- render + recognize ----------
+  async function show(n) {
+    current = Math.min(Math.max(1, n), total);
+    $("pnum").textContent = current;
+    $("prev").disabled = current === 1;
+    $("next").disabled = current === total;
+    var mine = ++token;
+
+    layer.innerHTML = "";
+    layer.classList.add("busy");
+
+    if (pdf) {
+      var page = await pdf.getPage(current);
+      var viewport = page.getViewport({ scale: OCR_SCALE });
+      canvas.width = Math.floor(viewport.width);
+      canvas.height = Math.floor(viewport.height);
+      var ctx = canvas.getContext("2d", { willReadFrequently: true });
+      ctx.fillStyle = "#fff";
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      await page.render({ canvasContext: ctx, viewport: viewport }).promise;
+      if (mine !== token) return;
+
+      if (!lines[current]) {
+        var content = await page.getTextContent();
+        var got = fromPdfText(content, viewport);
+        if (got && got.length >= 4) { lines[current] = got; native[current] = true; }
+      }
+      page.cleanup();
+    } else {
+      await drawImage(imageFile);
+      if (mine !== token) return;
+    }
+
+    applyZoom();
+
+    if (lines[current]) {
+      paint();
+      if (native[current]) { say("This page already had real text — no recognition needed.", false); hush(2200); }
+    } else {
+      await recognize(current, mine);
+    }
+    if (mine === token) layer.classList.remove("busy");
+    prefetchNext();
+  }
+
+  function drawImage(f) {
+    return new Promise(function (resolve, reject) {
+      var img = new Image();
+      img.onload = function () {
+        canvas.width = img.naturalWidth;
+        canvas.height = img.naturalHeight;
+        canvas.getContext("2d").drawImage(img, 0, 0);
+        URL.revokeObjectURL(img.src);
+        resolve();
+      };
+      img.onerror = reject;
+      img.src = URL.createObjectURL(f);
+    });
+  }
+
+  function toBlob(c) {
+    return new Promise(function (res) { c.toBlob(res, "image/png"); });
+  }
+
+  async function sendForOcr(c) {
+    var blob = await toBlob(c);
+    var res = await fetch("/ocr?lang=" + encodeURIComponent($("lang").value), {
+      method: "POST",
+      headers: { "Content-Type": "application/octet-stream" },
+      body: blob
+    });
+    var data = await res.json();
+    if (!res.ok) throw new Error(data.error || ("server returned " + res.status));
+    return data.lines.map(function (l) {
+      return { x0: l.x0, y0: l.y0, x1: l.x1, y1: l.y1, text: l.text, conf: l.confidence };
+    });
+  }
+
+  async function recognize(pageNo, mine) {
+    if (running) return;
+    running = true;
+    try {
+      say("Reading page " + pageNo + "… (first page also loads the models)", true);
+      var got = await sendForOcr(canvas);
+      if (mine !== token) return;
+      lines[pageNo] = got;
+      native[pageNo] = false;
+      paint();
+      say(got.length ? "Page " + pageNo + " is selectable — drag across the text." : "No text found on this page.", false);
+      hush(2600);
+    } catch (err) {
+      console.error(err);
+      say(explain(err), false, true);
+      hush(7000);
+    } finally {
+      running = false;
+    }
+  }
+
+  function explain(err) {
+    var m = (err && err.message) || String(err);
+    if (/Failed to fetch|NetworkError|load failed/i.test(m)) {
+      return "The OCR server isn't answering. Start it with \"python server.py\" in the same folder, then try again.";
+    }
+    return "Recognition failed: " + m;
+  }
+
+  function fromPdfText(content, viewport) {
+    var out = [];
+    content.items.forEach(function (it) {
+      if (!it.str || !it.str.trim()) return;
+      var tx = pdfjsLib.Util.transform(viewport.transform, it.transform);
+      var h = Math.hypot(tx[2], tx[3]);
+      var x = tx[4], y = tx[5] - h;
+      out.push({ x0: x, y0: y, x1: x + it.width * viewport.scale, y1: y + h, text: it.str, conf: 1 });
+    });
+    return out;
+  }
+
+  // ---------- text layer ----------
+  function paint() {
+    layer.innerHTML = "";
+    var data = lines[current] || [];
+    var ratio = canvas.clientWidth / canvas.width;
+    if (!ratio) return;
+
+    data.forEach(function (ln) {
+      var d = document.createElement("div");
+      d.className = "ln" + (ln.conf < 0.7 ? " weak" : "");
+      d.textContent = ln.text;
+      d.title = ln.conf < 1 ? Math.round(ln.conf * 100) + "% confident" : "";
+      var h = Math.max(4, (ln.y1 - ln.y0) * ratio);
+      d.style.left = (ln.x0 * ratio) + "px";
+      d.style.top = (ln.y0 * ratio) + "px";
+      d.style.fontSize = (h * 0.86) + "px";
+      layer.appendChild(d);
+      var want = (ln.x1 - ln.x0) * ratio, have = d.getBoundingClientRect().width;
+      if (have > 0) d.style.transform = "scaleX(" + (want / have) + ")";
+    });
+  }
+
+  // ---------- zoom ----------
+  function applyZoom() {
+    var v = $("zoom").value;
+    var natural = canvas.width / OCR_SCALE;
+    var width = v === "fit"
+      ? Math.min(stage.clientWidth - 52, canvas.width)
+      : natural * parseFloat(v);
+    sheet.style.width = Math.max(240, width) + "px";
+  }
+  $("zoom").addEventListener("change", function () { applyZoom(); paint(); });
+  window.addEventListener("resize", function () { if (sheet) { applyZoom(); paint(); } });
+
+  // ---------- controls ----------
+  $("prev").addEventListener("click", function () { if (current > 1) show(current - 1); });
+  $("next").addEventListener("click", function () { if (current < total) show(current + 1); });
+  document.addEventListener("keydown", function (e) {
+    if (/input|select|textarea/i.test(e.target.tagName)) return;
+    if (e.key === "ArrowLeft" && current > 1) show(current - 1);
+    if (e.key === "ArrowRight" && current < total) show(current + 1);
+  });
+  $("peek").addEventListener("change", function () {
+    if (layer) layer.classList.toggle("peek", this.checked);
+  });
+  $("lang").addEventListener("change", function () {
+    for (var k in lines) if (!native[k]) delete lines[k];
+    if (sheet) show(current);
+  });
+
+  $("copyPage").addEventListener("click", async function () {
+    var data = lines[current];
+    if (!data || !data.length) { say("Nothing recognized on this page yet.", false, true); hush(2500); return; }
+    var text = data.map(function (l) { return l.text; }).join("\n");
+    try {
+      await navigator.clipboard.writeText(text);
+      say("Page " + current + " copied.", false);
+    } catch (e) {
+      say("The browser blocked the clipboard — select the text and press Ctrl+C.", false, true);
+    }
+    hush(2200);
+  });
+
+  // Read the next page while you look at this one.
+  function prefetchNext() {
+    if (!pdf || current >= total || running) return;
+    var n = current + 1;
+    if (lines[n]) return;
+    setTimeout(async function () {
+      if (running || lines[n] || current !== n - 1) return;
+      var page = await pdf.getPage(n);
+      var viewport = page.getViewport({ scale: OCR_SCALE });
+      var off = document.createElement("canvas");
+      off.width = Math.floor(viewport.width);
+      off.height = Math.floor(viewport.height);
+      var ctx = off.getContext("2d", { willReadFrequently: true });
+      ctx.fillStyle = "#fff"; ctx.fillRect(0, 0, off.width, off.height);
+      await page.render({ canvasContext: ctx, viewport: viewport }).promise;
+
+      var content = await page.getTextContent();
+      var got = fromPdfText(content, viewport);
+      if (got && got.length >= 4) { lines[n] = got; native[n] = true; page.cleanup(); return; }
+
+      if (running || lines[n]) return;
+      running = true;
+      try { lines[n] = await sendForOcr(off); native[n] = false; }
+      catch (e) { /* it will simply be read again on arrival */ }
+      finally { running = false; page.cleanup(); }
+    }, 400);
+  }
+})();
+</script>
+</body>
+</html>
