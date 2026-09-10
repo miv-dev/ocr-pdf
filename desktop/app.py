@@ -118,17 +118,28 @@ def redirect_weights(data: Path) -> None:
     """
     Send the optional reading-order weights to the writable data folder too.
 
-    occular writes them into its own package directory by default; the module
-    globals are read at call time, so replacing them here is enough.
+    occular keeps that path in two places: model_files.READING_ORDER_DIR, which
+    download_reading_order() writes to, and reading_order._RO_DIR, which the
+    loader reads from. Both default to the package directory, which is read-only
+    in a frozen build — so patching one and not the other downloads the model to
+    somewhere the code that needs it will never look, which is what
+    "Модель порядка чтения не найдена в ...\\_internal\\occular\\weights" meant.
+
+    Both are module globals read at call time, so rebinding them here is enough.
+    If a future occular renames either one, get_pipeline() falls back to the
+    geometric column sort rather than failing.
     """
     try:
-        from occular import model_files
+        from occular import model_files, reading_order
     except Exception:                                  # noqa: BLE001
         return
+    if any(model_files.READING_ORDER_DIR.glob("*.onnx")):
+        return                                         # shipped inside the build
     target = data / "models" / "reading_order"
     target.mkdir(parents=True, exist_ok=True)
-    if not any(model_files.READING_ORDER_DIR.glob("*.onnx")):
-        model_files.READING_ORDER_DIR = target
+    model_files.READING_ORDER_DIR = target
+    reading_order._RO_DIR = target
+    logging.info("reading-order weights redirected to %s", target)
 
 
 # --------------------------------------------------------------------------

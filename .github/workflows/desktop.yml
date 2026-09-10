@@ -54,6 +54,12 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements-desktop.txt
 
+      # Cheap checks the smoke test cannot make: it stops at /health because
+      # loading a model would mean downloading 400 MB first, and these two bugs
+      # only show up after that point.
+      - name: Test
+        run: python desktop/test_desktop.py
+
       - name: Prefetch model weights
         if: inputs.bundle_weights
         run: python desktop/fetch_models.py

@@ -143,12 +143,27 @@ def get_pipeline(languages):
             if _pipe is None:
                 _reading_order = _try_reading_order()
             print(f"loading models (languages={languages or 'ru+en'}) …")
-            _pipe = OCRPipeline(Settings(
-                deskew=True,                    # straighten crooked scans
-                lm=True,                        # beam search + Russian language model
-                reading_order=_reading_order,   # order lines across columns
-                languages=languages,
-            ))
+
+            def build(with_reading_order):
+                return OCRPipeline(Settings(
+                    deskew=True,                 # straighten crooked scans
+                    lm=True,                     # beam search + Russian language model
+                    reading_order=with_reading_order,
+                    languages=languages,
+                ))
+
+            try:
+                _pipe = build(_reading_order)
+            except Exception as exc:               # noqa: BLE001
+                if not _reading_order:
+                    raise
+                # Downloading the layout model and loading it are separate steps
+                # that fail separately — it can land on disk somewhere the loader
+                # does not look. It is optional either way: order_lines() sorts
+                # columns geometrically. Losing column order beats losing OCR.
+                print(f"pipeline with reading order failed ({exc}); retrying without it")
+                _reading_order = False
+                _pipe = build(False)
         except Exception as exc:                   # noqa: BLE001
             _model_state, _model_error = "error", str(exc)
             raise
