@@ -110,6 +110,17 @@ def start_logging(data: Path) -> Path:
         # a stray print() would then raise. Send them to the log instead.
         stream = open(log_path, "a", encoding="utf-8", buffering=1)
         sys.stdout = sys.stderr = stream
+    else:
+        # A real console on Windows defaults to a code page that cannot encode
+        # Cyrillic — and occular narrates in Russian, emoji included ("✅ Уже
+        # скачана"). Printing that raises UnicodeEncodeError from inside a
+        # library we do not control, which is fatal wherever it lands. Ask for
+        # UTF-8 and settle for replacement characters over a crash.
+        for stream in (sys.stdout, sys.stderr):
+            try:
+                stream.reconfigure(encoding="utf-8", errors="replace")
+            except Exception:                          # noqa: BLE001
+                pass                                   # not a real stream; fine
 
     return log_path
 

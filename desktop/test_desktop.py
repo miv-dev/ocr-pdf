@@ -5,11 +5,12 @@ Run from the repository root:
 
     python desktop/test_desktop.py
 
-Both cases here are shipped bugs. The build's smoke test cannot catch them: it
+Every case here is a shipped bug. The build's smoke test cannot catch them: it
 would have to download 400 MB of weights before anything is loaded, so it stops
 at /health. These run in a second instead.
 """
 
+import io
 import sys
 import tempfile
 import types
@@ -108,9 +109,47 @@ def test_reading_order_failure_is_not_fatal():
         raise AssertionError("a real failure was swallowed")
 
 
+def test_russian_output_survives_a_windows_console():
+    """
+    Reporting the fallback must not become a second failure.
+
+    A Windows console encodes cp1252 by default and occular speaks Russian, so
+    print()ing its error raised UnicodeEncodeError — from inside the except
+    block handling the first problem, which put the crash straight back.
+    A cp1252 stdout here so the check does not depend on the runner's locale.
+    """
+    import server
+
+    stub = sys.modules["occular"]                  # left by the test above
+    attempts = []
+
+    def OCRPipeline(settings):
+        attempts.append(settings.reading_order)
+        if settings.reading_order:
+            raise FileNotFoundError("Модель порядка чтения не найдена")
+        return types.SimpleNamespace(settings=settings)
+
+    stub.OCRPipeline = OCRPipeline
+    server._pipe = server._pipe_lang = None
+
+    console = io.TextIOWrapper(io.BytesIO(), encoding="cp1252", errors="strict")
+    real, sys.stdout = sys.stdout, console
+    try:
+        server.get_pipeline(None)                  # raised UnicodeEncodeError here
+    finally:
+        sys.stdout = real
+
+    assert attempts == [True, False], f"never reached the retry, got {attempts}"
+    console.flush()
+    written = console.buffer.getvalue().decode("cp1252")
+    assert "retrying without it" in written, written
+
+
 if __name__ == "__main__":
     # Ordered: the second test replaces occular with a stub for good.
-    for test in (test_reading_order_paths_agree, test_reading_order_failure_is_not_fatal):
+    for test in (test_reading_order_paths_agree,
+                 test_reading_order_failure_is_not_fatal,
+                 test_russian_output_survives_a_windows_console):
         test()
         print(f"ok  {test.__name__}")
     print("\nall good")

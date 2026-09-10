@@ -37,6 +37,26 @@ DESKTOP = os.environ.get("OCCULAR_DESKTOP") == "1"
 EXPECTED_DOWNLOAD_BYTES = 400 * 1024 * 1024
 
 
+def _say(message):
+    """
+    print() that cannot raise.
+
+    occular narrates in Russian, and a Windows console defaults to a code page
+    that cannot encode Cyrillic — so an ordinary progress line raises
+    UnicodeEncodeError there. Inside an except block that turns a recovery into
+    a crash, which is how a missing optional model cost a reader their OCR.
+    """
+    try:
+        print(message)
+    except UnicodeEncodeError:
+        try:
+            print(message.encode("ascii", "backslashreplace").decode("ascii"))
+        except Exception:                          # noqa: BLE001
+            pass                                   # nowhere to say it; carry on
+    except Exception:                              # noqa: BLE001
+        pass
+
+
 def _cache_bytes():
     """How much is in the HuggingFace cache right now, part-downloaded files included."""
     try:
@@ -86,7 +106,7 @@ def _try_reading_order():
         download_reading_order()
         return True
     except Exception as exc:                       # noqa: BLE001
-        print(f"reading-order model unavailable ({exc}); using geometric column sort")
+        _say(f"reading-order model unavailable ({exc}); using geometric column sort")
         return False
 
 
@@ -142,7 +162,7 @@ def get_pipeline(languages):
                 _model_state = "downloading"
             if _pipe is None:
                 _reading_order = _try_reading_order()
-            print(f"loading models (languages={languages or 'ru+en'}) …")
+            _say(f"loading models (languages={languages or 'ru+en'}) …")
 
             def build(with_reading_order):
                 return OCRPipeline(Settings(
@@ -161,7 +181,7 @@ def get_pipeline(languages):
                 # that fail separately — it can land on disk somewhere the loader
                 # does not look. It is optional either way: order_lines() sorts
                 # columns geometrically. Losing column order beats losing OCR.
-                print(f"pipeline with reading order failed ({exc}); retrying without it")
+                _say(f"pipeline with reading order failed ({exc}); retrying without it")
                 _reading_order = False
                 _pipe = build(False)
         except Exception as exc:                   # noqa: BLE001
