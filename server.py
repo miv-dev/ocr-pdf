@@ -292,6 +292,6 @@ def ocr():
 
 
 if __name__ == "__main__":
-    print("http://localhost:8000  —  models load in the background")
+    _say("http://localhost:8000  —  models load in the background")
     warm_up()
     app.run(host="127.0.0.1", port=8000, threaded=True)
