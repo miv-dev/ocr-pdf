@@ -410,8 +410,15 @@
       headers: { "Content-Type": "application/octet-stream" },
       body: blob
     });
-    var data = await res.json();
-    if (!res.ok) throw new Error(data.error || ("server returned " + res.status));
+    // Check the status first and never assume JSON: an error raised before the
+    // route runs (an upload over the size cap, say) comes back as an HTML page,
+    // and parsing that first turned every such failure into
+    // "unexpected token '<'", which named neither the cause nor the status.
+    var body = await res.text();
+    var data;
+    try { data = JSON.parse(body); } catch (e) { data = null; }
+    if (!res.ok) throw new Error((data && data.error) || ("server returned " + res.status));
+    if (!data) throw new Error("the server replied with something that is not JSON");
     return data.lines.map(function (l) {
       return { x0: l.x0, y0: l.y0, x1: l.x1, y1: l.y1, text: l.text, conf: l.confidence };
     });

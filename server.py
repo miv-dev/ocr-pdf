@@ -15,10 +15,15 @@ import os
 import threading
 
 from flask import Flask, request, jsonify, send_from_directory
+from werkzeug.exceptions import HTTPException
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 app = Flask(__name__, static_folder=None)
-app.config["MAX_CONTENT_LENGTH"] = int(os.environ.get("MAX_UPLOAD_MB", 32)) * 1024 * 1024
+# A 300 dpi colour page, or a photo straight off a phone, goes well past 32 MB
+# as a PNG. Nothing crosses a network here — the page posts to loopback — so the
+# only real cost of a big upload is memory.
+MAX_UPLOAD_MB = int(os.environ.get("MAX_UPLOAD_MB", 256))
+app.config["MAX_CONTENT_LENGTH"] = MAX_UPLOAD_MB * 1024 * 1024
 
 _pipe = None
 _pipe_lang = None
@@ -205,6 +210,30 @@ def warm_up():
     threading.Thread(target=run, name="warm-up", daemon=True).start()
 
 
+@app.errorhandler(HTTPException)
+def http_error_as_json(exc):
+    """
+    Answer in JSON even when the failure happened before the view ran.
+
+    The page does res.json() on every reply, so Flask's HTML error page reached
+    the reader as "unexpected token '<', \"<!doctype\"" — which says nothing
+    about what went wrong. 413 is the one that bites: it is raised while reading
+    the request, so /ocr's own error handling never sees it.
+    """
+    message = exc.description
+    if exc.code == 413:
+        message = (f"That page is over {MAX_UPLOAD_MB} MB as a PNG. Set "
+                   f"MAX_UPLOAD_MB higher, or use a lower resolution.")
+    return jsonify({"error": message}), exc.code
+
+
+@app.errorhandler(Exception)
+def unexpected_error_as_json(exc):
+    """Same again for anything unplanned: a traceback in the log, JSON to the page."""
+    app.logger.exception("unhandled error")
+    return jsonify({"error": str(exc) or exc.__class__.__name__}), 500
+
+
 @app.route("/")
 def index():
     return send_from_directory(HERE, "index.html")
@@ -245,14 +274,14 @@ def ocr():
     else:
         languages = [c.strip() for c in lang.split(",") if c.strip()]
 
-    import numpy as np
-    import cv2
-
-    img = cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR)
-    if img is None:
-        return jsonify({"error": "could not decode the image"}), 400
-
     try:
+        import numpy as np
+        import cv2
+
+        img = cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR)
+        if img is None:
+            return jsonify({"error": "could not decode the image"}), 400
+
         with _lock:
             pipe = get_pipeline(languages)
             try:

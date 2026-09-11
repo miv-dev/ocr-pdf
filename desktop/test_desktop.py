@@ -21,6 +21,26 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "desktop"))
 
 
+def test_errors_are_json():
+    """
+    The page does res.json() on every reply, so an HTML error page is unreadable.
+
+    A page over the upload cap raises 413 while Flask is still reading the
+    request — before /ocr runs, so its own error handling never sees it. That
+    reached the reader as "unexpected token '<', \"<!doctype\"".
+    """
+    import server
+
+    client = server.app.test_client()
+    over = server.MAX_UPLOAD_MB * 1024 * 1024 + 1
+    reply = client.post("/ocr", data=b"x" * over, content_type="application/octet-stream")
+    assert reply.status_code == 413, reply.status_code
+    assert reply.is_json, reply.get_data()[:40]
+    assert "MAX_UPLOAD_MB" in reply.get_json()["error"]
+
+    assert client.get("/nope").is_json, "404 still answers in HTML"
+
+
 def test_reading_order_paths_agree():
     """
     The folder we download the layout model to must be the one we load it from.
@@ -147,7 +167,8 @@ def test_russian_output_survives_a_windows_console():
 
 if __name__ == "__main__":
     # Ordered: the second test replaces occular with a stub for good.
-    for test in (test_reading_order_paths_agree,
+    for test in (test_errors_are_json,
+                 test_reading_order_paths_agree,
                  test_reading_order_failure_is_not_fatal,
                  test_russian_output_survives_a_windows_console):
         test()
